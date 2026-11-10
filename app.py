@@ -1,55 +1,89 @@
-# ===== 1. Imports =====
+
+# ===== 1. Importer les bibliothèques =====
+
+import os  # Lire les variables d'environnement
 from typing import Literal
 
 import mlflow
 import mlflow.sklearn
 import pandas as pd
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 
 
-# ===== 2. Création de l'application FastAPI =====
-# Le titre apparaît dans la page de documentation interactive /docs
+# ===== 2. Créer l'application =====
+
 app = FastAPI(title="API Churn")
 
 
-# ===== 3. Chargement du modèle champion (une seule fois, au démarrage) =====
-# Recharger le modèle à chaque requête rendrait l'API très lente,
-# donc on le charge une seule fois en mémoire au lancement.
-mlflow.set_tracking_uri("sqlite:///mlflow.db")
-model = mlflow.sklearn.load_model("models:/churn-model@champion")
+# ===== 3. Lire la configuration dans les variables d'environnement =====
+
+# Rien n'est écrit « en dur » : le même code fonctionne sur le poste,
+# dans un conteneur seul ou dans Docker Compose.
+# Seules les variables d'environnement changent.
+
+TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+MODEL_URI = os.getenv("MODEL_URI", "models:/churn-model@champion")
 
 
-# ===== 4. Description du schéma d'entrée (validé automatiquement par Pydantic) =====
+# ===== 4. Charger le champion UNE SEULE FOIS, au démarrage =====
+
+# MODEL_URI peut être une adresse du Registry (models:/...)
+# ou un simple dossier (model).
+
+mlflow.set_tracking_uri(TRACKING_URI)
+
+model = mlflow.sklearn.load_model(MODEL_URI)
+
+print(f"Modèle chargé depuis : {MODEL_URI}")
+
+
+# ===== 5. Décrire les données attendues (validation automatique) =====
+
 class Client(BaseModel):
-    age: int                                          # nombre entier
-    salaire: float                                    # nombre décimal
-    abonnement: Literal["Basique", "Standard", "Premium"]  # 3 valeurs autorisées
+    age: int
+    salaire: float
+    abonnement: Literal["Basique", "Standard", "Premium"]
     anciennete: float
     consommation: float
 
 
-# ===== 5. Route /health : vérifier que l'API est opérationnelle =====
-@app.get("/health")  # GET : lecture seule, aucun corps envoyé
-def health() -> dict:
+# ===== 6. Route /health : vérifier que l'API est en vie =====
+
+@app.get("/health")
+def health():
     return {"status": "ok"}
 
 
-# ===== 6. Route /predict : recevoir un client, renvoyer la prédiction =====
-@app.post("/predict")  # POST : on envoie un client dans le corps
-def predict(client: Client) -> dict:
-    # a) Transformation du client reçu en DataFrame d'une ligne
+# ===== 7. Route /predict : recevoir un client et renvoyer la prédiction =====
+
+@app.post("/predict")
+def predict(client: Client):
+
+    # a) Transformer le client reçu en tableau d'une ligne
     ligne = pd.DataFrame([client.model_dump()])
 
-    # b) Encodage one-hot de la colonne 'abonnement' (comme à l'entraînement)
+    # b) Transformer le texte « abonnement » en colonnes 0/1,
+    # comme à l'entraînement
     ligne = pd.get_dummies(ligne)
 
-    # c) Alignement sur les colonnes attendues par le modèle
-    #    (colonnes manquantes comblées par 0, ordre respecté)
-    ligne = ligne.reindex(columns=model.feature_names_in_, fill_value=0)
+    # c) Garder les colonnes du modèle dans le bon ordre ;
+    # les colonnes absentes prennent la valeur 0
+    ligne = ligne.reindex(
+        columns=model.feature_names_in_,
+        fill_value=0
+    )
 
-    # d) Prédiction : 1 = départ, 0 = resté
+    # d) Effectuer la prédiction :
+    # 1 = le client part, 0 = le client reste
     resultat = int(model.predict(ligne)[0])
-    message = "Le client va partir" if resultat == 1 else "Le client reste"
 
-    return {"churn": resultat, "message": message}
+    return {
+        "churn": resultat,
+        "message": (
+            "Le client va partir"
+            if resultat == 1
+            else "Le client reste"
+        )
+    }
